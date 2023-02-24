@@ -1,0 +1,575 @@
+---
+title: "Code_tvQAR"
+author: "Manon Felix"
+date: "2023-02-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# [1.] Packages
+
+```{r}
+library(roahd)
+library(fda)
+library(rootSolve)
+library(ggplot2)
+library(hrbrthemes)
+library(tidyverse)
+library(gridExtra)
+library(grid)
+library(gridtext)
+```
+
+
+# [2.] Functions 
+
+
+## [2.1] Kernel function and check function
+
+```{r}
+# Define a function called "kern.func" which takes in three arguments: "u0", "n", and "b".
+kern.func <- function(u0, n, b) {
+
+u <- (u0 - (1:n)/n)/b
+
+# Calculate the value of "K" using the ifelse statement. 
+# -If the absolute value of "u" is less than or equal to 1, K will equal 0.75 times (1 minus the absolute value of u squared). 
+# -If the absolute value of "u" is greater than 1, K will equal 0.
+K = ifelse(abs(u) <= 1, 0.75*(1 - abs(u)^2), 0)
+
+# Return the value of "K".
+return(K)
+}
+
+rho <- function(u, tau){u*(tau - as.numeric(u <= 0))}
+```
+
+
+## [2.2] Loss functions 
+
+* 1. Loss without the kernel 
+* 2. Loss with constant polynomial approximation
+* 3. Loss with linear polynomial approximation
+* 4. Loss with quadratic polynomial approximation
+
+```{r}
+loss_nocst <- function(u0, tau, theta = c(), T, b, p){
+  
+  Y_vec = na.omit(tsutils::lagmatrix(Y, -p)) #matrix of size T-p x p
+  
+  lagmat = na.omit(tsutils::lagmatrix(Y, 1:p))
+  
+  covariates_mat = cbind(rep(1, T-p), lagmat) #matrix of size T-p x (p + 1) because we add the interecept column 
+  
+  u = Y_vec - as.numeric(covariates_mat %*% theta[1:(p+1)]) #If p = 3, T = 10, Y starts from Y4 to Y10 
+
+  loss = sum(rho(u = u, tau = tau)) #multiply the loss by the kernel 
+  
+  return(loss)
+}
+
+loss_const <- function(u0, tau, theta = c(), T, b, p){
+  
+  Y_vec = na.omit(tsutils::lagmatrix(Y, -p)) #matrix of size T-p x p
+  
+  lagmat = na.omit(tsutils::lagmatrix(Y, 1:p))
+  
+  covariates_mat = cbind(rep(1, T-p), lagmat) #matrix of size T-p x (p + 1) because we add the interecept column 
+  
+  u = Y_vec - as.numeric(covariates_mat %*% theta[1:(p+1)]) #If p = 3, T = 10, Y starts from Y4 to Y10 
+  
+  Ki_u0 = kern.func(u0, (T-p), b) # vector (n - p) x 1 
+  
+  loss = sum(rho(u = u, tau = tau)*kern.func(u0, (T-p), b)) #multiply the loss by the kernel 
+  
+  return(loss)
+}
+
+loss_linear <- function(u0, tau, theta = c(), T, b, p){
+  
+  Y_vec = na.omit(tsutils::lagmatrix(Y, -p)) #matrix of size T-p x p
+  
+  lagmat = na.omit(tsutils::lagmatrix(Y, 1:p))
+  
+  covariates_mat = cbind(rep(1, T-p), lagmat) #matrix of size T-p x (p + 1) because we add the interecept column 
+  
+  i = (1+p):(T)
+  
+  val = i/T - u0 # terms which multiply the local linear part 
+  
+  lin_part_coef = theta[(p+2):(2*(p+1))] 
+  
+  dim(lin_part_coef) = c(p+1,1) 
+  
+  dim(theta) = c(2*(p+1), 1)
+  
+  us = Y_vec - as.numeric(covariates_mat %*% theta[1:(p+1)]) - as.numeric(covariates_mat %*% lin_part_coef * val)
+  
+  L = sum(rho(us, tau) * kern.func(u0, (T-p), b))
+  
+  return(L)
+}
+
+
+loss_quadra <- function(u0, tau, theta = c(), T, b, p){
+  
+  Y_vec = na.omit(tsutils::lagmatrix(Y, -p)) #matrix of size T-p x p
+  
+  lagmat = na.omit(tsutils::lagmatrix(Y, 1:p))
+  
+  covariates_mat = cbind(rep(1, T-p), lagmat) #matrix of size T-p x (p + 1) because we add the interecept column 
+  
+  i = (1+p):(T)
+  
+  val = i/T - u0 # terms which multiply the local linear part 
+  
+  lin_part_coef = theta[(p+2):(2*(p+1))] 
+  
+  quadra_part_coef = theta[(p + 1 + p + 1 + 1):(3*(p+1))] 
+  
+  dim(lin_part_coef) = c(p+1,1) 
+  
+  dim(quadra_part_coef) = c(p+1,1) 
+  
+  dim(theta) = c(3*(p+1), 1)
+  
+  us = Y_vec - as.numeric(covariates_mat %*% theta[1:(p+1)]) - as.numeric(covariates_mat %*% lin_part_coef * val) -  as.numeric(covariates_mat %*% quadra_part_coef * val^2 / 2)
+  
+  L = sum(rho(us, tau) * kern.func(u0, (T-p), b))
+  
+  return(L)
+}
+```
+
+
+## [2.3] Parameters function
+
+```{r}
+theta_fct_sine <- function(t, T, c = 18, d= 0.2) {
+    (d*sin(t/T * c) + 0.2 +  c/30 * (t / T) + d/25 * (t / T) - 0.08*((t/T)+1)^3)*0.4
+}
+```
+
+
+# [3.] Code Figure 1. 
+
+```{r}
+## Parabolic 
+theta_fct_para <- function(t, T, c = 0.1, d = 0.85) {
+ c * (t / T) + d * (t / T)^{2.5}
+ # c * (t / T) + d * (t / T)^3
+}
+
+
+plot(1:100/100, theta_fct_para(1:100,100), type = "l")
+```
+
+
+```{r, eval = FALSE}
+######################### 0.5 #######################
+
+
+m = mt = 1
+n = 4000
+dim_para = p = 1
+u0s = seq(0,1,l=(n-1))
+set.seed(29)
+
+Q_nocst5 <- matrix(NA, nrow = mt, ncol = (length(u0s)))
+par_nocst <- array(rep(1, mt*(length(u0s))*(dim_para+1)), dim=c(mt, length(u0s), dim_para+1))
+
+
+
+
+ # Simulate the AR(1)
+  eps = rnorm(n)
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+  
+  Y[i + 1] = rep(as.numeric(0.5, dim_para)) %*% Y[(i-(dim_para-1)):i] + eps[i]
+
+  }
+
+  # Use the mapply function instead of a for loop to optimize coef and coef_lin
+  results <- mapply(function(j) {
+    list(
+      #optim(par = c(rep(0, dim_para+1)), loss_const, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par,
+      optim(par = c(rep(0, dim_para+1)), loss_nocst, tau = 0.5, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+    )
+  }, j = 1:(length(u0s)))
+  
+  par_nocst[m,,] = do.call(rbind, results)
+
+  ## Scatterplot; estimated quantiles / true quantiles
+  lagmat = t(cbind(rep(1, n-p), na.omit(tsutils::lagmatrix(Y, 1:p))))
+  #Q0[m,] = c(qnorm(taus,0,1) + theta_fct_para(u0s[j]*n, T = n) * Y[val_Y])
+  Q_nocst5[m,] = as.numeric(diag(par_nocst[m,,] %*% lagmat))
+  #Q_lin[m,] = diag(par_lin[m,,1:(p+1)] %*% lagmat)
+
+
+
+theta_true = cbind(rep(qnorm(0.5,0,1), n-1), 0.5)
+
+Q5_truecst = diag(theta_true %*% lagmat)
+
+Q_nocst05 <- matrix(NA,  nrow = mt, ncol = (length(u0s)))
+
+  # Simulate the AR(1)
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+  
+  Y[i + 1] = rep(as.numeric(theta_fct_para(i+1, n)), dim_para) %*% Y[(i-(dim_para-1)):i] + eps[i]
+
+  }
+  # Use the mapply function instead of a for loop to optimize coef and coef_lin
+  results <- mapply(function(j) {
+    list(
+      optim(par = c(rep(0, dim_para+1)), loss_nocst, tau = 0.5, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+    )
+  }, j = 1:(length(u0s)))
+  
+  par_nocst[m,,] = do.call(rbind, results)
+
+  ## Scatterplot; estimated quantiles / true quantiles
+  lagmat = t(cbind(rep(1, n-p), na.omit(tsutils::lagmatrix(Y, 1:p))))
+  #Q0[m,] = c(qnorm(taus,0,1) + theta_fct_para(u0s[j]*n, T = n) * Y[val_Y])
+  Q_nocst05[m,] = as.numeric(diag(par_nocst[m,,] %*% lagmat))
+
+
+theta_true = cbind(rep(qnorm(0.5,0,1), n-1), theta_fct_para(u0s*n, n))
+
+Q05_truetv = diag(theta_true %*% lagmat)
+
+# A basic scatterplot with color depending on Species
+p5 <- ggplot(NULL, aes(x=Q5_truecst, y=Q_nocst5)) + 
+  geom_point(aes(x=Q05_truetv, y=Q_nocst05), color="#7d9fc2", shape = 3, size = 1) +
+  geom_abline(slope = 1, size = 1.2) +
+  geom_point(size=1, color = "#C582B2", shape = 4)+
+  theme_minimal()+
+  labs(x = "True conditional quantiles", y = "Estimated conditional quantiles") 
+  #coord_fixed(xlim = c(min(Q_nocst05), max(Q_nocst05)))
+
+
+######################### 0.15 #######################
+
+
+dim_para = p = 1
+u0s = seq(0,1,l=(n-1))
+set.seed(29)
+
+Q_nocst15 <- matrix(NA,  nrow = mt, ncol = (length(u0s)))
+par_nocst <- array(rep(1, mt*(length(u0s))*(dim_para+1)), dim=c(mt, length(u0s), dim_para+1))
+
+
+m = 1
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+  
+  Y[i + 1] = rep(as.numeric(0.5, dim_para)) %*% Y[(i-(dim_para-1)):i] + eps[i]
+
+  }
+
+  # Use the mapply function instead of a for loop to optimize coef and coef_lin
+  results <- mapply(function(j) {
+    list(
+      #optim(par = c(rep(0, dim_para+1)), loss_const, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par,
+      optim(par = c(rep(0, dim_para+1)), loss_nocst, tau = 0.15, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+    )
+  }, j = 1:(length(u0s)))
+  
+  par_nocst[m,,] = do.call(rbind, results)
+
+  ## Scatterplot; estimated quantiles / true quantiles
+  lagmat = t(cbind(rep(1, n-p), na.omit(tsutils::lagmatrix(Y, 1:p))))
+  #Q0[m,] = c(qnorm(taus,0,1) + theta_fct_para(u0s[j]*n, T = n) * Y[val_Y])
+  Q_nocst15[m,] = as.numeric(diag(par_nocst[m,,] %*% lagmat))
+  #Q_lin[m,] = diag(par_lin[m,,1:(p+1)] %*% lagmat)
+
+
+
+theta_true = cbind(rep(qnorm(0.15,0,1), n-1), 0.5)
+
+Q15_truecst = diag(theta_true %*% lagmat)
+
+Q_nocst015 <- matrix(NA,  nrow = mt, ncol = (length(u0s)))
+
+  # Simulate the AR(1)
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+  
+  Y[i + 1] = rep(as.numeric(theta_fct_para(i+1, n)), dim_para) %*% Y[(i-(dim_para-1)):i] + eps[i]
+
+  }
+  # Use the mapply function instead of a for loop to optimize coef and coef_lin
+  results <- mapply(function(j) {
+    list(
+      optim(par = c(rep(0, dim_para+1)), loss_nocst, tau = 0.15, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+    )
+  }, j = 1:(length(u0s)))
+  
+  par_nocst[m,,] = do.call(rbind, results)
+
+  ## Scatterplot; estimated quantiles / true quantiles
+  lagmat = t(cbind(rep(1, n-p), na.omit(tsutils::lagmatrix(Y, 1:p))))
+  #Q0[m,] = c(qnorm(taus,0,1) + theta_fct_para(u0s[j]*n, T = n) * Y[val_Y])
+  Q_nocst015[m,] = as.numeric(diag(par_nocst[m,,] %*% lagmat))
+
+
+theta_true = cbind(rep(qnorm(0.15,0,1), n-1), theta_fct_para(u0s*n, n))
+
+Q015_truetv = diag(theta_true %*% lagmat)
+
+# A basic scatterplot with color depending on Species
+p15 <- ggplot(NULL, aes(x=Q15_truecst, y=Q_nocst15)) + 
+  geom_point(aes(x=Q015_truetv, y=Q_nocst015), color="#7d9fc2", shape = 3, size = 1) +
+  geom_abline(slope = 1, size = 1.2) +
+  geom_point(size=1, color = "#C582B2", shape = 4)+
+  theme_minimal()+
+  labs(x = "True conditional quantiles", y = "Estimated conditional quantiles") 
+  #coord_fixed(xlim = c(min(Q_nocst05), max(Q_nocst05)))
+
+
+
+# Remove axis titles from all plots
+p = list(p15, p5) %>% map(~.x + labs(x=NULL, y=NULL))
+# gridtext
+yleft = richtext_grob("Estimated conditional quantiles", rot=90)
+
+bottom = richtext_grob(
+  text = 'True conditional quantiles'
+)
+
+# Lay out plots
+uni <- grid.arrange(grobs=p, ncol = 2, nrow = 1, left = yleft, bottom = bottom)
+```
+
+# [4.] Monte-Carlo simulations 
+
+```{r, eval = FALSE}
+set.seed(1)
+mt = 100
+
+dim_para = p = 3
+
+tau = 0.5
+
+n = 3000
+b = 0.05
+
+u0s = seq(0, 1, l = n/30)
+j = 1:length(u0s)
+
+par_cst <- array(rep(1, mt*length(u0s)*(dim_para+1)), dim=c(mt, length(u0s), dim_para+1))
+par_lin <- array(rep(1, mt*length(u0s)*(2*dim_para+2) ),dim=c(mt, length(u0s), 2*dim_para+2))
+par_quadra <- array(rep(1, mt*length(u0s)*(3*(dim_para+1)) ),dim=c(mt, length(u0s), 3*(dim_para+1)))
+
+
+Q0 <- matrix(NA,  ncol = mt, nrow = length(u0s))
+Q_cst <- matrix(NA,  ncol = mt, nrow = length(u0s))
+Q_lin <- matrix(NA,  ncol = mt, nrow = length(u0s))
+
+
+for (m in 1:mt){
+  
+  # Simulate the AR(10)
+  eps = rnorm(n)
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+  
+   Y[i + 1] = as.numeric(c(theta_fct_sine(-(i+1)+1, n)/3, theta_fct_sine(-(i+1)+1, n), theta_fct_sine(-(i+1)+1, n)/10)) %*% Y[(i-(dim_para-1)):i] + eps[i]
+
+  }
+  
+  # Use the mapply function instead of a for loop to optimize coef and coef_lin
+  results <- mapply(function(j) {
+    list(
+      optim(par = c(rep(0, dim_para+1)), loss_const, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par,
+      optim(par = c(rep(0, 2*(dim_para+1))), loss_linear, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par,
+      optim(par = c(rep(0, 3*(dim_para+1))), loss_quadra, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+    )
+  }, j = 1:(length(u0s)))
+  
+  par_cst[m,,] = do.call(rbind, results[seq(1,(3*length(u0s)-2), by = 3)])
+  par_lin[m,,] = do.call(rbind, results[seq(2,(3*length(u0s)-1), by = 3)])
+  par_quadra[m,,] = do.call(rbind, results[seq(3,(3*length(u0s)), by = 3)])
+
+  print(m)
+}
+
+# save(par_cst, file="par_cst.rda")
+# save(par_lin, file="par_lin.rda")
+# save(par_quadra, file="par_quadra.rda")
+```
+
+## [4.1] Code Figure 2. 
+
+Load the results from the Monte-Carlo simulations. 
+
+```{r}
+load("par_cst.rda")
+load("par_lin.rda")
+load("par_quadra.rda")
+```
+
+Note that we changed the colors and y-scale by modifiying directly the source's code. 
+
+```{r}
+n = 3000
+u0s = seq(0, 1, l = n/30)
+##### Functional boxplots
+op <- par(mfrow = c(3,1),
+          oma = c(4,3,0,0) + 0.1,
+          mar = c(0,0,2,0) + 0.1)
+
+theta2 = theta_fct_sine(-u0s*n + 1,n)
+
+grid2 = u0s
+fD = fData(grid2, par_cst[,,3])
+
+roahd::fbplot(fD, 
+        xlab = '', ylab = '', 
+           Fvalue = 10, lwd =1,
+        main = '')
+lines(u0s, theta2)
+
+grid2 = u0s
+fD = fData(grid2, par_lin[,,3])
+
+roahd::fbplot(fD, 
+        xlab = '', ylab = '', 
+           Fvalue = 10, lwd =1,
+        main = '')
+lines(u0s, theta2)
+
+fD = fData(grid2, par_quadra[,,3])
+
+roahd::fbplot(fD, 
+        xlab = 'i/n', ylab = '', 
+           Fvalue = 10, lwd =1,
+        main = '')
+lines(u0s, theta2)
+```
+
+## [4.2] Code Figure 3. 
+
+```{r}
+MSE_lin <- mapply(function(j){
+  mean((par_lin[,j,3] - theta_fct_sine(-u0s[j]*n+1,n))^2)
+}, j = 1:(length(u0s)))
+
+BIAS_lin = mapply(function(j){
+  mean((par_lin[,j,3] - theta_fct_sine(-u0s[j]*n+1,n)))
+}, j = 1:(length(u0s)))
+
+MSE_cst <- mapply(function(j){
+  mean((par_cst[,j,3] - theta_fct_sine(-u0s[j]*n+1,n))^2)
+}, j = 1:(length(u0s)))
+
+BIAS_cst = mapply(function(j){
+  mean((par_cst[,j,3] - theta_fct_sine(-u0s[j]*n+1,n)))
+}, j = 1:(length(u0s)))
+
+MSE_quadra <- mapply(function(j){
+  mean((par_quadra[,j,3] - theta_fct_sine(-u0s[j]*n+1,n))^2)
+}, j = 1:(length(u0s)))
+
+BIAS_quadra = mapply(function(j){
+  mean((par_quadra[,j,3] - theta_fct_sine(-u0s[j]*n+1,n)))
+}, j = 1:(length(u0s)))
+
+
+a = data.frame(group = "Local constant", value = MSE_cst)
+b = data.frame(group = "Local linear", value =  MSE_lin)
+c = data.frame(group = "Local quadratic", value = MSE_quadra)
+
+plot.data = rbind(a, b, c) 
+
+plot.data$u0s <- rep(u0s, 3)
+
+
+ggplot(plot.data, aes(x = u0s, y = value, group = group, col = group, linetype = group)) +
+  geom_line(lwd = 1) +
+  scale_linetype_manual(values = c("dashed", "solid", "dotted")) +
+  scale_color_manual(values = c("#7d9fc2","#DEB478", "#C582B2" )) +
+  theme_bw() +
+  labs(x = "i/n", y = "Estimated MSE") +
+  theme(legend.title= element_blank())
+
+```
+
+# [5.] Computation time 
+
+```{r}
+set.seed(1)
+library(tictoc)
+mt = 100
+
+dim_para = p = 3
+
+
+## Sine wave 
+theta_fct_sine <- function(t, T, c = 38, d= 0.2) {
+  (d*sin(t/T * c) + 0.2  * (t / T) + d/25 * (t / T) - 0.08*((t/T)+1)^3) + 0.5
+  
+}
+
+tau = 0.5
+
+n = 3000
+b = 0.05
+
+u0s = seq(0, 1, l = n/30)
+j = 1:length(u0s)
+
+
+  eps = rnorm(n)
+  
+  Y <- array(NA, dim = n)
+  Y[1:dim_para] <- 0 
+  
+  for (i in dim_para:(n-1)){
+    
+    Y[i + 1] = as.numeric(c(theta_fct_sine(-(i+1)+1, n)/3, theta_fct_sine(-(i+1)+1, n), theta_fct_sine(-(i+1)+1, n)/10)) %*% Y[(i-(dim_para-1)):i] + eps[i]
+    
+  }
+  
+
+  # Estimation 
+tic()
+      mapply(function(j){
+      optim(par = c(rep(0, dim_para+1)), loss_const, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+      }, j = 1:(length(u0s)))
+toc()
+      
+tic()
+      mapply(function(j){
+      optim(par = c(rep(0, 2*(dim_para+1))), loss_linear, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+      }, j = 1:(length(u0s)))
+toc()  
+
+tic()
+mapply(function(j){
+       optim(par = c(rep(0, 3*(dim_para+1))), loss_quadra, tau = tau, u0 = u0s[j], T = n, b = b, p = dim_para)$par
+}, j = 1:(length(u0s)))
+toc()  
+  
+```
+
